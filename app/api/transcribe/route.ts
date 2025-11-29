@@ -10,9 +10,11 @@ import { generatePDF } from '@/lib/pdfGenerator'
 const MAX_SIZE = 25 * 1024 * 1024 // 25 MB - límite de OpenAI
 const CHUNK_SIZE = 20 * 1024 * 1024 // 20 MB por chunk
 
-// Configurar OpenAI
+// Configurar OpenAI con reintentos y timeout más largo
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+  timeout: 120000, // 2 minutos de timeout
+  maxRetries: 3, // 3 reintentos automáticos
 })
 
 // Runtime configuration
@@ -56,21 +58,53 @@ async function splitMP3IntoChunks(filePath: string, fileSize: number): Promise<s
   return chunks
 }
 
-// Función para transcribir con OpenAI
-async function transcribeAudio(filePath: string): Promise<string> {
-  const fs = require('fs')
-  const audioStream = fs.createReadStream(filePath)
+// Función para transcribir con OpenAI con manejo de errores mejorado
+async function transcribeAudio(filePath: string, retryCount = 0): Promise<string> {
+  const MAX_RETRIES = 3
+  
+  try {
+    const fs = require('fs')
+    const audioStream = fs.createReadStream(filePath)
 
-  // Whisper-1 es el único modelo disponible, pero optimizamos con configuración
-  const transcription = await openai.audio.transcriptions.create({
-    file: audioStream,
-    model: 'whisper-1', // Único modelo disponible ($0.006/minuto)
-    response_format: 'text', // Formato más simple y eficiente
-    language: 'es', // Especificar idioma ahorra procesamiento
-    temperature: 0, // Más determinista, menos procesamiento
-  })
+    // Whisper-1 es el único modelo disponible, pero optimizamos con configuración
+    const transcription = await openai.audio.transcriptions.create({
+      file: audioStream,
+      model: 'whisper-1', // Único modelo disponible ($0.006/minuto)
+      response_format: 'text', // Formato más simple y eficiente
+      language: 'es', // Especificar idioma ahorra procesamiento
+      temperature: 0, // Más determinista, menos procesamiento
+    })
 
-  return transcription as string
+    return transcription as string
+    
+  } catch (error: any) {
+    // Manejo específico de errores de OpenAI
+    if (error.status === 401) {
+      throw new Error('API key de OpenAI inválida. Por favor, verifica tu configuración en .env.local')
+    }
+    
+    if (error.status === 429) {
+      throw new Error('Límite de rate excedido. Espera unos minutos e intenta nuevamente.')
+    }
+    
+    if (error.status === 413) {
+      throw new Error('El archivo es demasiado grande para este fragmento.')
+    }
+    
+    // Errores de conexión - reintentar
+    if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.message.includes('Connection error')) {
+      if (retryCount < MAX_RETRIES) {
+        const waitTime = (retryCount + 1) * 2000 // Esperar 2s, 4s, 6s
+        console.log(`  ⏳ Error de conexión. Reintentando en ${waitTime/1000}s... (Intento ${retryCount + 1}/${MAX_RETRIES})`)
+        await new Promise(resolve => setTimeout(resolve, waitTime))
+        return transcribeAudio(filePath, retryCount + 1)
+      }
+      throw new Error('Error de conexión con OpenAI después de varios intentos. Verifica tu conexión a internet y que tu API key sea válida.')
+    }
+    
+    // Otros errores
+    throw new Error(error.message || 'Error desconocido al transcribir audio')
+  }
 }
 
 // Función principal de procesamiento
@@ -147,11 +181,23 @@ export async function POST(req: NextRequest) {
 
     // Verificar API key
     if (!process.env.OPENAI_API_KEY) {
+      console.error('❌ OPENAI_API_KEY no está configurada')
       return NextResponse.json(
-        { error: 'API Key de OpenAI no configurada' },
+        { error: 'API Key de OpenAI no configurada. Verifica tu archivo .env.local' },
         { status: 500 }
       )
     }
+    
+    // Validar formato de API key
+    if (!process.env.OPENAI_API_KEY.startsWith('sk-')) {
+      console.error('❌ API key no tiene formato válido')
+      return NextResponse.json(
+        { error: 'API Key de OpenAI inválida. Debe comenzar con "sk-"' },
+        { status: 500 }
+      )
+    }
+    
+    console.log('✅ API Key detectada:', process.env.OPENAI_API_KEY.substring(0, 15) + '...')
 
     // Obtener el archivo del formulario
     const formData = await req.formData()

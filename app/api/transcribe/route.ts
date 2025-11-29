@@ -143,6 +143,7 @@ async function processAudioFile(filePath: string, fileSize: number, originalName
           const chunkTranscription = await transcribeAudio(chunks[i])
           transcriptions.push(chunkTranscription)
           console.log(`  ✓ Fragmento ${i + 1} completado`)
+          console.log(`  📝 Texto: ${chunkTranscription}...`)
         } catch (error: any) {
           console.error(`❌ Error en fragmento ${i + 1}:`, error.message)
           
@@ -163,6 +164,7 @@ async function processAudioFile(filePath: string, fileSize: number, originalName
     }
     
     console.log('✅ Transcripción completada exitosamente')
+    console.log(`📝 Texto transcrito: ${fullTranscription}...`)
     return fullTranscription
     
   } finally {
